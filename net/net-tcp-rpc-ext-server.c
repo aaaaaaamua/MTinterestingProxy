@@ -68,6 +68,7 @@
 int tcp_rpcs_compact_parse_execute (connection_job_t c);
 int tcp_rpcs_ext_alarm (connection_job_t c);
 int tcp_rpcs_ext_init_accepted (connection_job_t c);
+int tcp_rpcs_ext_close_connection (connection_job_t c, int who);
 
 conn_type_t ct_tcp_rpc_ext_server = {
   .magic = CONN_FUNC_MAGIC,
@@ -75,7 +76,7 @@ conn_type_t ct_tcp_rpc_ext_server = {
   .title = "rpc_ext_server",
   .init_accepted = tcp_rpcs_ext_init_accepted,
   .parse_execute = tcp_rpcs_compact_parse_execute,
-  .close = tcp_rpcs_close_connection,
+  .close = tcp_rpcs_ext_close_connection,
   .flush = tcp_rpc_flush,
   .write_packet = tcp_rpc_write_packet_compact,
   .connected = server_failed,
@@ -147,12 +148,45 @@ int tcp_proxy_pass_write_packet (connection_job_t C, struct raw_message *raw) {
 
 int tcp_rpcs_default_execute (connection_job_t c, int op, struct raw_message *msg);
 
-static unsigned char ext_secret[16][16];
+struct secret_binding {
+  unsigned char key[16];
+  unsigned int bound_ip;
+  int active_conns;
+};
+
+static struct secret_binding ext_secrets[16];
 static int ext_secret_cnt = 0;
 
 void tcp_rpcs_set_ext_secret (unsigned char secret[16]) {
-  assert (ext_secret_cnt < 16);
-  memcpy (ext_secret[ext_secret_cnt ++], secret, 16);
+  if (ext_secret_cnt < 16) {
+    memcpy (ext_secrets[ext_secret_cnt].key, secret, 16);
+    ext_secrets[ext_secret_cnt].bound_ip = 0;
+    ext_secrets[ext_secret_cnt].active_conns = 0;
+    ext_secret_cnt++;
+  }
+}
+
+void tcp_rpcs_clear_secrets (void) {
+  ext_secret_cnt = 0;
+}
+
+void tcp_rpcs_add_secret_from_db (const char *hex_secret, const char *bound_ip_str) {
+  if (ext_secret_cnt >= 16) return;
+  unsigned char secret[16];
+  int i;
+  for (i = 0; i < 16; i++) {
+    unsigned int val;
+    sscanf (hex_secret + i * 2, "%2x", &val);
+    secret[i] = (unsigned char)val;
+  }
+  memcpy (ext_secrets[ext_secret_cnt].key, secret, 16);
+  ext_secrets[ext_secret_cnt].active_conns = 0;
+  if (bound_ip_str && strlen(bound_ip_str) > 0) {
+    ext_secrets[ext_secret_cnt].bound_ip = inet_addr(bound_ip_str);
+  } else {
+    ext_secrets[ext_secret_cnt].bound_ip = 0;
+  }
+  ext_secret_cnt++;
 }
 
 static int allow_only_tls;
@@ -992,8 +1026,24 @@ int tcp_rpcs_ext_alarm (connection_job_t C) {
 }
 
 int tcp_rpcs_ext_init_accepted (connection_job_t C) {
+  struct tcp_rpc_data *D = TCP_RPC_DATA (C);
+  D->secret_id = -1;
   job_timer_insert (C, precise_now + 10);
   return tcp_rpcs_init_accepted_nohs (C);
+}
+
+int tcp_rpcs_ext_close_connection (connection_job_t C, int who) {
+  struct tcp_rpc_data *D = TCP_RPC_DATA (C);
+  if (D->secret_id >= 0 && D->secret_id < 16) {
+    ext_secrets[D->secret_id].active_conns--;
+    if (ext_secrets[D->secret_id].active_conns <= 0) {
+      ext_secrets[D->secret_id].active_conns = 0;
+      ext_secrets[D->secret_id].bound_ip = 0;
+      vkprintf (1, "Secret %d unbound from IP %s (all connections closed)\n", 
+                D->secret_id, show_remote_ip(C));
+    }
+  }
+  return tcp_rpcs_close_connection (C, who);
 }
 
 int tcp_rpcs_compact_parse_execute (connection_job_t C) {
@@ -1150,16 +1200,28 @@ int tcp_rpcs_compact_parse_execute (connection_job_t C) {
         delete_old_client_randoms();
 
         unsigned char expected_random[32];
-        int secret_id;
-        for (secret_id = 0; secret_id < ext_secret_cnt; secret_id++) {
-          sha256_hmac (ext_secret[secret_id], 16, client_hello, len, expected_random);
+        int sid;
+        for (sid = 0; sid < ext_secret_cnt; sid++) {
+          sha256_hmac (ext_secrets[sid].key, 16, client_hello, len, expected_random);
           if (memcmp (expected_random, client_random, 28) == 0) {
+            unsigned int client_ip = c->remote_ip;
+            if (ext_secrets[sid].bound_ip != 0 && ext_secrets[sid].bound_ip != client_ip) {
+              vkprintf (1, "Secret %d already bound to IP %s, rejecting connection from %s\n", 
+                        sid, inet_ntoa(*(struct in_addr *)&ext_secrets[sid].bound_ip), show_remote_ip(C));
+              continue; 
+            }
+            if (ext_secrets[sid].bound_ip == 0) {
+              ext_secrets[sid].bound_ip = client_ip;
+              vkprintf (1, "Secret %d newly bound to IP %s\n", sid, show_remote_ip(C));
+            }
+            ext_secrets[sid].active_conns++;
+            D->secret_id = sid;
             break;
           }
         }
-        if (secret_id == ext_secret_cnt) {
-          vkprintf (1, "Receive request with unmatched client random\n");
-          RETURN_TLS_ERROR(info);
+        if (sid == ext_secret_cnt) {
+          vkprintf (1, "Receive request with unmatched client random or IP mismatch\n");
+          RETURN_TLS_ERROR(default_domain_info);
         }
         int timestamp = *(int *)(expected_random + 28) ^ *(int *)(client_random + 28);
         if (!is_allowed_timestamp (timestamp)) {
@@ -1231,7 +1293,7 @@ int tcp_rpcs_compact_parse_execute (connection_job_t C) {
         RAND_bytes (response_buffer + pos, encrypted_size);
 
         unsigned char server_random[32];
-        sha256_hmac (ext_secret[secret_id], 16, buffer, 32 + response_size, server_random);
+        sha256_hmac (ext_secrets[D->secret_id].key, 16, buffer, 32 + response_size, server_random);
         memcpy (response_buffer + 11, server_random, 32);
 
         struct raw_message *m = calloc (sizeof (struct raw_message), 1);
@@ -1278,11 +1340,15 @@ int tcp_rpcs_compact_parse_execute (connection_job_t C) {
       struct aes_key_data key_data;
       
       int ok = 0;
-      int secret_id;
-      for (secret_id = 0; secret_id < 1 || secret_id < ext_secret_cnt; secret_id++) {
+      int sid;
+      for (sid = 0; sid < 1 || sid < ext_secret_cnt; sid++) {
         if (ext_secret_cnt > 0) {
+          unsigned int client_ip = c->remote_ip;
+          if (ext_secrets[sid].bound_ip != 0 && ext_secrets[sid].bound_ip != client_ip) {
+             continue;
+          }
           memcpy (k, random_header + 8, 32);
-          memcpy (k + 32, ext_secret[secret_id], 16);
+          memcpy (k + 32, ext_secrets[sid].key, 16);
           sha256 (k, 48, key_data.read_key);
         } else {
           memcpy (key_data.read_key, random_header + 8, 32);
@@ -1314,10 +1380,16 @@ int tcp_rpcs_compact_parse_execute (connection_job_t C) {
             vkprintf (1, "Expected random padding mode\n");
             RETURN_TLS_ERROR(default_domain_info);
           }
+          if (ext_secret_cnt > 0) {
+            if (ext_secrets[sid].bound_ip == 0) {
+              ext_secrets[sid].bound_ip = c->remote_ip;
+            }
+            ext_secrets[sid].active_conns++;
+            D->secret_id = sid;
+          }
           assert (rwm_skip_data (&c->in, 64) == 64);
           rwm_union (&c->in_u, &c->in);
           rwm_init (&c->in, 0);
-          // T->read_pos = 64;
           D->in_packet_num = 0;
           switch (tag) {
             case 0xeeeeeeee:
@@ -1368,13 +1440,9 @@ int tcp_rpcs_compact_parse_execute (connection_job_t C) {
 
     int packet_len_bytes = 4;
     if (D->flags & RPC_F_MEDIUM) {
-      // packet len in `medium` mode
-      //if (D->crypto_flags & RPCF_QUICKACK) {
         D->flags = (D->flags & ~RPC_F_QUICKACK) | (packet_len & RPC_F_QUICKACK);
         packet_len &= ~RPC_F_QUICKACK;
-      //}
     } else {
-      // packet len in `compact` mode
       if (packet_len & 0x80) {
         D->flags |= RPC_F_QUICKACK;
         packet_len &= ~0x80;
@@ -1435,7 +1503,6 @@ int tcp_rpcs_compact_parse_execute (connection_job_t C) {
 
     int res = -1;
 
-    /* main case */
     c->last_response_time = precise_now;
     if (packet_type == RPC_PING) {
       res = tcp_rpcs_default_execute (C, packet_type, &msg);
@@ -1451,9 +1518,3 @@ int tcp_rpcs_compact_parse_execute (connection_job_t C) {
   return NEED_MORE_BYTES;
 #undef RETURN_TLS_ERROR
 }
-
-/*
- *
- *                END (EXTERNAL RPC SERVER)
- *
- */
