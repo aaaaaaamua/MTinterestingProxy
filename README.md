@@ -28,7 +28,6 @@ CREATE TABLE IF NOT EXISTS secrets (
     id INT AUTO_INCREMENT PRIMARY KEY,
     secret_hex CHAR(32) NOT NULL UNIQUE,
     bound_ip VARCHAR(45) DEFAULT NULL,   -- 支持 IPv6 格式
-    active_conns INT DEFAULT 0,           -- 记录当前活跃连接数
     is_active TINYINT(1) DEFAULT 1        -- 1=启用, 0=禁用
 );
 ```
