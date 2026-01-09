@@ -206,7 +206,13 @@ void tcp_rpcs_add_secret_from_db (const char *hex_secret, const char *bound_ip_s
   // Only if it's truly new and has a bound_ip from DB (Admin manual bind)
   if (old_idx == ext_secret_cnt) {
     if (bound_ip_str && strlen(bound_ip_str) > 0) {
-      new_ext_secrets[new_ext_secret_cnt].bound_ip = inet_addr(bound_ip_str);
+      unsigned int db_ip = inet_addr(bound_ip_str);
+      // Correct byte order: inet_addr returns Big-Endian, 
+      // MTProxy expects host-order (likely Little-Endian on this system).
+      // We flip it to match how db_notify_bound_ip saves it.
+      unsigned char *s = (unsigned char *)&db_ip;
+      unsigned int host_ip = (s[3] << 24) | (s[2] << 16) | (s[1] << 8) | s[0];
+      new_ext_secrets[new_ext_secret_cnt].bound_ip = host_ip;
     }
   }
   

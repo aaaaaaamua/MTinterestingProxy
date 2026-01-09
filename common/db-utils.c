@@ -43,7 +43,6 @@ void db_init (void) {
   kprintf ("MySQL session established with %s:%d\n", proxy_db_config.host, proxy_db_config.port);
 }
 
-// Internal thread-unsafe executor
 static int _db_execute_raw(const char *query) {
     if (!conn) db_init();
     if (!conn) return -1;
@@ -66,7 +65,7 @@ extern int tcp_rpcs_get_secret_id_info (int sid, char *hex_out, unsigned int *ip
 extern void tcp_rpcs_check_keepalive (void);
 extern void tcp_rpcs_kick_secret (const char *hex_secret);
 
-// Immediate write-back on handshake with BYTE-BY-BYTE IP formatting
+// Fixed: IP byte order corrected to b[3].b[2].b[1].b[0]
 void db_notify_bound_ip (int sid, unsigned int ip) {
     char hex[33];
     unsigned int dummy_ip;
@@ -75,10 +74,10 @@ void db_notify_bound_ip (int sid, unsigned int ip) {
         char query[256];
         char ip_str[INET_ADDRSTRLEN];
         
-        // Manual Byte Extraction to ignore system endianness and fix reversal
-        // Assuming 'ip' holds 112, 93, 142, 180 but interpreted reversed as 180, 142, 93, 112
+        // MTProxy uses Little-Endian for IP. 112.93.142.180 is stored as [180, 142, 93, 112].
+        // We must reverse it for standard string representation.
         unsigned char *b = (unsigned char *)&ip;
-        sprintf(ip_str, "%u.%u.%u.%u", b[0], b[1], b[2], b[3]);
+        sprintf(ip_str, "%u.%u.%u.%u", b[3], b[2], b[1], b[0]);
 
         sprintf(query, "UPDATE secrets SET bound_ip='%s' WHERE secret_hex='%s'", ip_str, hex);
         
@@ -94,7 +93,7 @@ void db_sync_secrets (void) {
   if (!conn) db_init();
   if (!conn) { pthread_mutex_unlock(&db_mutex); return; }
 
-  // 1. Periodic Write-back (Only bound_ip if present, NO active_conns)
+  // 1. Periodic Write-back (Byte order fixed)
   int i, total = tcp_rpcs_get_count();
   for (i = 0; i < total; i++) {
     char hex[33];
@@ -105,7 +104,7 @@ void db_sync_secrets (void) {
         char query[512];
         char ip_str[INET_ADDRSTRLEN];
         unsigned char *b = (unsigned char *)&ip;
-        sprintf(ip_str, "%u.%u.%u.%u", b[0], b[1], b[2], b[3]);
+        sprintf(ip_str, "%u.%u.%u.%u", b[3], b[2], b[1], b[0]);
         sprintf(query, "UPDATE secrets SET bound_ip='%s' WHERE secret_hex='%s'", ip_str, hex);
         _db_execute_raw(query);
       }
