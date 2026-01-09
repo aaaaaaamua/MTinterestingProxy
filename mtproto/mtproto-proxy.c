@@ -61,6 +61,7 @@
 #include "mtproto-common.h"
 #include "mtproto-config.h"
 #include "common/tl-parse.h"
+#include "common/db-utils.h"
 #include "engine/engine.h"
 #include "engine/engine-net.h"
 
@@ -2192,6 +2193,21 @@ int f_parse_option (int val) {
     tcp_rpc_add_proxy_domain (optarg);
     domain_count++;
     break;
+  case 3001:
+    proxy_db_config.host = strdup(optarg);
+    break;
+  case 3002:
+    proxy_db_config.port = atoi(optarg);
+    break;
+  case 3003:
+    proxy_db_config.user = strdup(optarg);
+    break;
+  case 3004:
+    proxy_db_config.pwd = strdup(optarg);
+    break;
+  case 3005:
+    proxy_db_config.name = strdup(optarg);
+    break;
   case 'S':
   case 'P':
     {
@@ -2235,6 +2251,11 @@ int f_parse_option (int val) {
 }
 
 void mtfront_prepare_parse_options (void) {
+  parse_option ("db-host", required_argument, 0, 3001, "MySQL host for secrets");
+  parse_option ("db-port", required_argument, 0, 3002, "MySQL port for secrets");
+  parse_option ("db-user", required_argument, 0, 3003, "MySQL user");
+  parse_option ("db-pwd", required_argument, 0, 3004, "MySQL password");
+  parse_option ("db-name", required_argument, 0, 3005, "MySQL database name");
   parse_option ("http-stats", no_argument, 0, 2000, "allow http server to answer on stats queries");
   parse_option ("mtproto-secret", required_argument, 0, 'S', "16-byte secret in hex mode");
   parse_option ("proxy-tag", required_argument, 0, 'P', "16-byte proxy tag in hex mode to be passed along with all forwarded queries");
@@ -2320,6 +2341,7 @@ void mtfront_pre_init (void) {
 }
 
 void mtfront_pre_start (void) {
+  db_start_sync_thread ();
   int res = do_reload_config (0x17);
 
   if (res < 0) {

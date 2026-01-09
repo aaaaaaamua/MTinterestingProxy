@@ -137,6 +137,7 @@ struct tcp_rpc_data {
   int extra_int2;
   int extra_int3;
   int extra_int4;
+  int secret_id;
   double extra_double, extra_double2;
   crc32_partial_func_t custom_crc_partial;
 };
@@ -168,4 +169,3 @@ unsigned tcp_set_default_rpc_flags (unsigned and_flags, unsigned or_flags);
 unsigned tcp_get_default_rpc_flags (void);
 void tcp_set_max_dh_accept_rate (int rate);
 int tcp_add_dh_accept (void);
-
