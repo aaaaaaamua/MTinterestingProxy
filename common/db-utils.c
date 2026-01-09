@@ -56,14 +56,19 @@ void db_sync_secrets (void) {
     unsigned int ip;
     int conns;
     if (tcp_rpcs_get_secret_id_info(i, hex, &ip, &conns)) {
-      char query[256];
+      char query[512];
       if (ip == 0) {
         sprintf(query, "UPDATE secrets SET bound_ip=NULL, active_conns=%d WHERE secret_hex='%s'", conns, hex);
       } else {
+        char ip_str[INET_ADDRSTRLEN];
         struct in_addr addr;
         addr.s_addr = ip;
-        sprintf(query, "UPDATE secrets SET bound_ip='%s', active_conns=%d WHERE secret_hex='%s'", inet_ntoa(addr), conns, hex);
+        if (inet_ntop(AF_INET, &addr, ip_str, INET_ADDRSTRLEN) == NULL) {
+            continue;
+        }
+        sprintf(query, "UPDATE secrets SET bound_ip='%s', active_conns=%d WHERE secret_hex='%s'", ip_str, conns, hex);
       }
+      // vkprintf (0, "DEBUG: DB Write-back: %s\n", query);
       if (mysql_query(conn, query)) {
         kprintf("Error: mysql_query write-back failed: %s\n", mysql_error(conn));
         // If connection lost, try to reconnect next time
