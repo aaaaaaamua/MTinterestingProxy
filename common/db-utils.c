@@ -4,6 +4,7 @@
 #include <string.h>
 #include <pthread.h>
 #include <unistd.h>
+#include <arpa/inet.h>
 #include "common/db-utils.h"
 #include "common/kprintf.h"
 
@@ -39,6 +40,8 @@ void db_init (void) {
 extern void tcp_rpcs_clear_secrets (void);
 extern void tcp_rpcs_add_secret_from_db (const char *hex_secret, const char *bound_ip);
 extern void tcp_rpcs_commit_secrets (void);
+extern int tcp_rpcs_get_count (void);
+extern int tcp_rpcs_get_secret_id_info (int sid, char *hex_out, unsigned int *ip_out, int *conns_out);
 
 void db_sync_secrets (void) {
   if (!conn) {
@@ -46,8 +49,34 @@ void db_sync_secrets (void) {
     if (!conn) return;
   }
 
+  // 1. Write back memory states to DB (Support Multi-IP binding visualization)
+  int i, total = tcp_rpcs_get_count();
+  for (i = 0; i < total; i++) {
+    char hex[33];
+    unsigned int ip;
+    int conns;
+    if (tcp_rpcs_get_secret_id_info(i, hex, &ip, &conns)) {
+      char query[256];
+      if (ip == 0) {
+        sprintf(query, "UPDATE secrets SET bound_ip=NULL, active_conns=%d WHERE secret_hex='%s'", conns, hex);
+      } else {
+        struct in_addr addr;
+        addr.s_addr = ip;
+        sprintf(query, "UPDATE secrets SET bound_ip='%s', active_conns=%d WHERE secret_hex='%s'", inet_ntoa(addr), conns, hex);
+      }
+      if (mysql_query(conn, query)) {
+        kprintf("Error: mysql_query write-back failed: %s\n", mysql_error(conn));
+        // If connection lost, try to reconnect next time
+        if (mysql_errno(conn) == 2006 || mysql_errno(conn) == 2013) {
+            mysql_close(conn); conn = NULL; return;
+        }
+      }
+    }
+  }
+
+  // 2. Fetch latest secrets from DB
   if (mysql_query (conn, "SELECT secret_hex, bound_ip FROM secrets WHERE is_active=1")) {
-    kprintf ("Error: mysql_query failed: %s\n", mysql_error (conn));
+    kprintf ("Error: mysql_query fetch failed: %s\n", mysql_error (conn));
     return;
   }
 

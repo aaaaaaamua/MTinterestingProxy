@@ -212,6 +212,22 @@ void tcp_rpcs_commit_secrets (void) {
   ext_secret_cnt = new_ext_secret_cnt;
 }
 
+int tcp_rpcs_get_secret_id_info (int sid, char *hex_out, unsigned int *ip_out, int *conns_out) {
+  if (sid < 0 || sid >= ext_secret_cnt) return 0;
+  int i;
+  for (i = 0; i < 16; i++) {
+    sprintf (hex_out + i * 2, "%02x", ext_secrets[sid].key[i]);
+  }
+  hex_out[32] = 0;
+  *ip_out = ext_secrets[sid].bound_ip;
+  *conns_out = ext_secrets[sid].active_conns;
+  return 1;
+}
+
+int tcp_rpcs_get_count (void) {
+  return ext_secret_cnt;
+}
+
 static int allow_only_tls;
 
 struct domain_info {
@@ -407,7 +423,7 @@ static unsigned char *create_request (const char *domain) {
   add_random (result, &pos, 32);
   add_string (result, &pos, "\x00\x22", 2);
   add_grease (result, &pos, greases, 0);
-  add_string (result, &pos, "\x13\x01\x13\x02\x13\x03\xc0\x2b\xc0\x2f\xc0\x2c\xc0\x30\cc\xa9\cc\xa8"
+  add_string (result, &pos, "\x13\x01\x13\x02\x13\x03\xc0\x2b\xc0\x2f\xc0\x2c\xc0\x30\xcc\xa9\xcc\xa8"
                             "\xc0\x13\xc0\x14\x00\x9c\x00\x9d\x00\x2f\x00\x35\x00\x0a\x01\x00\x01\x91", 36);
   add_grease (result, &pos, greases, 2);
   add_string (result, &pos, "\x00\x00\x00\x00", 4);
@@ -1061,12 +1077,12 @@ int tcp_rpcs_ext_close_connection (connection_job_t C, int who) {
     if (ext_secrets[D->secret_id].active_conns > 0) {
       ext_secrets[D->secret_id].active_conns--;
     }
-    vkprintf (0, "[DISC] Client Disconnected: IP %s (Secret #%d, Remaining Conns: %d)\n", 
-              show_remote_ip(C), D->secret_id, ext_secrets[D->secret_id].active_conns);
+    vkprintf (2, "[DISC] Client Disconnected: IP %s (Remaining: %d)\n", 
+              show_remote_ip(C), ext_secrets[D->secret_id].active_conns);
     if (ext_secrets[D->secret_id].active_conns <= 0) {
       ext_secrets[D->secret_id].active_conns = 0;
       ext_secrets[D->secret_id].bound_ip = 0;
-      vkprintf (0, "[AUTH] IP Unbound: Secret #%d is now FREE\n", D->secret_id);
+      vkprintf (0, "[AUTH] Logout: Secret #%d is now available\n", D->secret_id);
     }
   }
   return tcp_rpcs_close_connection (C, who);
@@ -1238,10 +1254,10 @@ int tcp_rpcs_compact_parse_execute (connection_job_t C) {
             }
             if (ext_secrets[sid].bound_ip == 0) {
               ext_secrets[sid].bound_ip = client_ip;
-              vkprintf (0, "[AUTH] New IP Bound: Secret #%d locked to IP %s\n", sid, show_remote_ip(C));
+              vkprintf (0, "[AUTH] Login: IP %s secured Secret #%d\n", show_remote_ip(C), sid);
             }
-            vkprintf (0, "[CONN] Client Connected: IP %s matched Secret #%d (Total Conns: %d)\n", 
-                      show_remote_ip(C), sid, ext_secrets[sid].active_conns + 1);
+            vkprintf (2, "[CONN] Client Connected: IP %s (Total Conns: %d)\n", 
+                      show_remote_ip(C), ext_secrets[sid].active_conns + 1);
             ext_secrets[sid].active_conns++;
             D->secret_id = sid;
             break;
@@ -1411,10 +1427,10 @@ int tcp_rpcs_compact_parse_execute (connection_job_t C) {
           if (ext_secret_cnt > 0) {
             if (ext_secrets[sid].bound_ip == 0) {
               ext_secrets[sid].bound_ip = c->remote_ip;
-              vkprintf (0, "[AUTH] New IP Bound (Obfs): Secret #%d locked to IP %s\n", sid, show_remote_ip(C));
+              vkprintf (0, "[AUTH] Login (Obfs): IP %s secured Secret #%d\n", show_remote_ip(C), sid);
             }
-            vkprintf (0, "[CONN] Client Connected (Obfs): IP %s matched Secret #%d (Total Conns: %d)\n", 
-                      show_remote_ip(C), sid, ext_secrets[sid].active_conns + 1);
+            vkprintf (2, "[CONN] Client Connected (Obfs): IP %s (Total: %d)\n", 
+                      show_remote_ip(C), ext_secrets[sid].active_conns + 1);
             ext_secrets[sid].active_conns++;
             D->secret_id = sid;
           }
