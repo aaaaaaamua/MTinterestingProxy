@@ -43,6 +43,7 @@ void db_init (void) {
   kprintf ("MySQL session established with %s:%d\n", proxy_db_config.host, proxy_db_config.port);
 }
 
+// Internal thread-unsafe executor
 static int _db_execute_raw(const char *query) {
     if (!conn) db_init();
     if (!conn) return -1;
@@ -51,7 +52,7 @@ static int _db_execute_raw(const char *query) {
 
     int res = mysql_query(conn, query);
     if (res) {
-        kprintf("MySQL Error [%s]: %s\n", query, mysql_error(conn));
+        kprintf("MySQL Error: %s\n", mysql_error(conn));
     }
     return res;
 }
@@ -65,7 +66,7 @@ extern int tcp_rpcs_get_secret_id_info (int sid, char *hex_out, unsigned int *ip
 extern void tcp_rpcs_check_keepalive (void);
 extern void tcp_rpcs_kick_secret (const char *hex_secret);
 
-// Immediate write-back on handshake
+// Immediate write-back on handshake with BYTE-BY-BYTE IP formatting
 void db_notify_bound_ip (int sid, unsigned int ip) {
     char hex[33];
     unsigned int dummy_ip;
@@ -73,18 +74,12 @@ void db_notify_bound_ip (int sid, unsigned int ip) {
     if (tcp_rpcs_get_secret_id_info(sid, hex, &dummy_ip, &dummy_conns)) {
         char query[256];
         char ip_str[INET_ADDRSTRLEN];
-        struct in_addr addr;
-        // Fix byte order: MTProxy stores IP in Little-Endian or specific format, 
-        // inet_ntop expects Network Byte Order (Big-Endian).
-        addr.s_addr = htonl(ntohl(ip)); 
-        // Actually, if it's 180.142.93.112 instead of 112.93.142.180, it's a simple bswap issue.
-        // Let's use a reliable byte-by-byte approach if htonl doesn't cut it, 
-        // but typically ntohl(ip) and then casting correctly works.
-        addr.s_addr = ip; // Keep as is and use custom stringify if needed, but let's try __builtin_bswap32
-        unsigned int reversed_ip = __builtin_bswap32(ip);
-        addr.s_addr = reversed_ip;
+        
+        // Manual Byte Extraction to ignore system endianness and fix reversal
+        // Assuming 'ip' holds 112, 93, 142, 180 but interpreted reversed as 180, 142, 93, 112
+        unsigned char *b = (unsigned char *)&ip;
+        sprintf(ip_str, "%u.%u.%u.%u", b[0], b[1], b[2], b[3]);
 
-        inet_ntop(AF_INET, &addr, ip_str, INET_ADDRSTRLEN);
         sprintf(query, "UPDATE secrets SET bound_ip='%s' WHERE secret_hex='%s'", ip_str, hex);
         
         pthread_mutex_lock(&db_mutex);
@@ -99,7 +94,7 @@ void db_sync_secrets (void) {
   if (!conn) db_init();
   if (!conn) { pthread_mutex_unlock(&db_mutex); return; }
 
-  // 1. Write back memory states (Only bound_ip if present, no conns)
+  // 1. Periodic Write-back (Only bound_ip if present, NO active_conns)
   int i, total = tcp_rpcs_get_count();
   for (i = 0; i < total; i++) {
     char hex[33];
@@ -109,9 +104,8 @@ void db_sync_secrets (void) {
       if (ip != 0) {
         char query[512];
         char ip_str[INET_ADDRSTRLEN];
-        struct in_addr addr;
-        addr.s_addr = __builtin_bswap32(ip);
-        inet_ntop(AF_INET, &addr, ip_str, INET_ADDRSTRLEN);
+        unsigned char *b = (unsigned char *)&ip;
+        sprintf(ip_str, "%u.%u.%u.%u", b[0], b[1], b[2], b[3]);
         sprintf(query, "UPDATE secrets SET bound_ip='%s' WHERE secret_hex='%s'", ip_str, hex);
         _db_execute_raw(query);
       }
@@ -121,7 +115,6 @@ void db_sync_secrets (void) {
 
   // 2. Process Kicks
   if (mysql_query (conn, "SELECT secret_hex FROM secrets WHERE is_active=0")) {
-      kprintf ("Error: mysql_query kick check failed\n");
   } else {
       MYSQL_RES *res_kick = mysql_store_result (conn);
       if (res_kick) {
@@ -135,7 +128,6 @@ void db_sync_secrets (void) {
 
   // 3. Reload active secrets
   if (mysql_query (conn, "SELECT secret_hex, bound_ip FROM secrets WHERE is_active=1")) {
-    kprintf ("Error: mysql_query fetch failed: %s\n", mysql_error(conn));
   } else {
     MYSQL_RES *res = mysql_store_result (conn);
     if (res) {
@@ -176,3 +168,4 @@ void db_start_sync_thread (void) {
     pthread_detach (tid);
   }
 }
+  pthread_t tid;
