@@ -42,6 +42,25 @@ extern void tcp_rpcs_add_secret_from_db (const char *hex_secret, const char *bou
 extern void tcp_rpcs_commit_secrets (void);
 extern int tcp_rpcs_get_count (void);
 extern int tcp_rpcs_get_secret_id_info (int sid, char *hex_out, unsigned int *ip_out, int *conns_out);
+extern void tcp_rpcs_check_keepalive (void);
+extern void tcp_rpcs_kick_secret (const char *hex_secret);
+
+// Immediate write-back on handshake
+void db_notify_bound_ip (int sid, unsigned int ip) {
+    if (!conn) return;
+    char hex[33];
+    unsigned int dummy_ip;
+    int dummy_conns;
+    if (tcp_rpcs_get_secret_id_info(sid, hex, &dummy_ip, &dummy_conns)) {
+        char query[256];
+        char ip_str[INET_ADDRSTRLEN];
+        struct in_addr addr;
+        addr.s_addr = ip;
+        inet_ntop(AF_INET, &addr, ip_str, INET_ADDRSTRLEN);
+        sprintf(query, "UPDATE secrets SET bound_ip='%s', active_conns=1 WHERE secret_hex='%s'", ip_str, hex);
+        mysql_query(conn, query);
+    }
+}
 
 void db_sync_secrets (void) {
   if (!conn) {
@@ -49,7 +68,7 @@ void db_sync_secrets (void) {
     if (!conn) return;
   }
 
-  // 1. Write back memory states to DB (Support Multi-IP binding visualization)
+  // 1. Full write-back state
   int i, total = tcp_rpcs_get_count();
   for (i = 0; i < total; i++) {
     char hex[33];
@@ -63,25 +82,31 @@ void db_sync_secrets (void) {
         char ip_str[INET_ADDRSTRLEN];
         struct in_addr addr;
         addr.s_addr = ip;
-        if (inet_ntop(AF_INET, &addr, ip_str, INET_ADDRSTRLEN) == NULL) {
-            continue;
-        }
+        inet_ntop(AF_INET, &addr, ip_str, INET_ADDRSTRLEN);
         sprintf(query, "UPDATE secrets SET bound_ip='%s', active_conns=%d WHERE secret_hex='%s'", ip_str, conns, hex);
       }
-      // vkprintf (0, "DEBUG: DB Write-back: %s\n", query);
-      if (mysql_query(conn, query)) {
-        kprintf("Error: mysql_query write-back failed: %s\n", mysql_error(conn));
-        // If connection lost, try to reconnect next time
-        if (mysql_errno(conn) == 2006 || mysql_errno(conn) == 2013) {
-            mysql_close(conn); conn = NULL; return;
-        }
-      }
+      mysql_query(conn, query);
     }
   }
 
-  // 2. Fetch latest secrets from DB
+  // 2. Process Kicks and Sync (Only active secrets)
+  // Logic: Secrets in DB with is_active=0 should be kicked
+  if (mysql_query (conn, "SELECT secret_hex FROM secrets WHERE is_active=0")) {
+      kprintf ("Error: mysql_query kick check failed\n");
+  } else {
+      MYSQL_RES *res_kick = mysql_store_result (conn);
+      if (res_kick) {
+          MYSQL_ROW row_kick;
+          while ((row_kick = mysql_fetch_row (res_kick))) {
+              tcp_rpcs_kick_secret (row_kick[0]);
+          }
+          mysql_free_result (res_kick);
+      }
+  }
+
+  // 3. Reload secrets
   if (mysql_query (conn, "SELECT secret_hex, bound_ip FROM secrets WHERE is_active=1")) {
-    kprintf ("Error: mysql_query fetch failed: %s\n", mysql_error (conn));
+    kprintf ("Error: mysql_query fetch failed\n");
     return;
   }
 
@@ -89,20 +114,28 @@ void db_sync_secrets (void) {
   if (!res) return;
 
   tcp_rpcs_clear_secrets ();
-
   MYSQL_ROW row;
   while ((row = mysql_fetch_row (res))) {
     tcp_rpcs_add_secret_from_db (row[0], row[1]);
   }
-
   tcp_rpcs_commit_secrets ();
   mysql_free_result (res);
 }
 
 static void *db_sync_thread_main (void *arg) {
+  int tick = 0;
   while (1) {
-    db_sync_secrets ();
-    sleep (10); // Sync every 10 seconds
+    tick++;
+    // Periodic Keepalive Check (Every 30s)
+    if (tick % 3 == 0) {
+        tcp_rpcs_check_keepalive();
+    }
+    // Periodic Full DB Sync (Every 60s)
+    if (tick >= 6) {
+        db_sync_secrets();
+        tick = 0;
+    }
+    sleep (10); 
   }
   return NULL;
 }

@@ -148,10 +148,14 @@ int tcp_proxy_pass_write_packet (connection_job_t C, struct raw_message *raw) {
 
 int tcp_rpcs_default_execute (connection_job_t c, int op, struct raw_message *msg);
 
+// External callback to db-utils.c
+extern void db_notify_bound_ip (int sid, unsigned int ip);
+
 struct secret_binding {
   unsigned char key[16];
   unsigned int bound_ip;
   int active_conns;
+  int fail_count;
 };
 
 static struct secret_binding ext_secrets[16];
@@ -162,6 +166,7 @@ void tcp_rpcs_set_ext_secret (unsigned char secret[16]) {
     memcpy (ext_secrets[ext_secret_cnt].key, secret, 16);
     ext_secrets[ext_secret_cnt].bound_ip = 0;
     ext_secrets[ext_secret_cnt].active_conns = 0;
+    ext_secrets[ext_secret_cnt].fail_count = 0;
     ext_secret_cnt++;
   }
 }
@@ -193,11 +198,12 @@ void tcp_rpcs_add_secret_from_db (const char *hex_secret, const char *bound_ip_s
     if (!memcmp(ext_secrets[old_idx].key, secret, 16)) {
       new_ext_secrets[new_ext_secret_cnt].bound_ip = ext_secrets[old_idx].bound_ip;
       new_ext_secrets[new_ext_secret_cnt].active_conns = ext_secrets[old_idx].active_conns;
+      new_ext_secrets[new_ext_secret_cnt].fail_count = ext_secrets[old_idx].fail_count;
       break;
     }
   }
 
-  // Only if it's truly new and has a bound_ip from DB (manual override)
+  // If new from DB and has explicit bound_ip, use it
   if (old_idx == ext_secret_cnt) {
     if (bound_ip_str && strlen(bound_ip_str) > 0) {
       new_ext_secrets[new_ext_secret_cnt].bound_ip = inet_addr(bound_ip_str);
@@ -226,6 +232,45 @@ int tcp_rpcs_get_secret_id_info (int sid, char *hex_out, unsigned int *ip_out, i
 
 int tcp_rpcs_get_count (void) {
   return ext_secret_cnt;
+}
+
+// 30s check for keepalive/fail_count logic
+void tcp_rpcs_check_keepalive (void) {
+    int i;
+    for (i = 0; i < ext_secret_cnt; i++) {
+        if (ext_secrets[i].bound_ip != 0 && ext_secrets[i].active_conns == 0) {
+            ext_secrets[i].fail_count++;
+            if (ext_secrets[i].fail_count >= 4) {
+                vkprintf (0, "[AUTH] Logout: Secret #%d is now available (Idle timeout)\n", i);
+                ext_secrets[i].bound_ip = 0;
+                ext_secrets[i].fail_count = 0;
+            }
+        } else {
+            ext_secrets[i].fail_count = 0;
+        }
+    }
+}
+
+// Kick logic
+void tcp_rpcs_kick_secret (const char *hex_secret) {
+    unsigned char secret[16];
+    int i;
+    for (i = 0; i < 16; i++) {
+        unsigned int val;
+        sscanf (hex_secret + i * 2, "%2x", &val);
+        secret[i] = (unsigned char)val;
+    }
+    for (i = 0; i < ext_secret_cnt; i++) {
+        if (!memcmp(ext_secrets[i].key, secret, 16)) {
+            if (ext_secrets[i].bound_ip != 0) {
+                vkprintf (0, "[AUTH] Kicked: Secret #%d forced disconnect\n", i);
+                ext_secrets[i].bound_ip = 0;
+                ext_secrets[i].active_conns = 0;
+                ext_secrets[i].fail_count = 0;
+            }
+            break;
+        }
+    }
 }
 
 static int allow_only_tls;
@@ -1079,11 +1124,7 @@ int tcp_rpcs_ext_close_connection (connection_job_t C, int who) {
     }
     vkprintf (2, "[DISC] Client Disconnected: IP %s (Remaining: %d)\n", 
               show_remote_ip(C), ext_secrets[D->secret_id].active_conns);
-    if (ext_secrets[D->secret_id].active_conns <= 0) {
-      ext_secrets[D->secret_id].active_conns = 0;
-      ext_secrets[D->secret_id].bound_ip = 0;
-      vkprintf (0, "[AUTH] Logout: Secret #%d is now available\n", D->secret_id);
-    }
+    // Anti-flap Logout logic moved to check_keepalive (30s x 4)
   }
   return tcp_rpcs_close_connection (C, who);
 }
@@ -1255,10 +1296,12 @@ int tcp_rpcs_compact_parse_execute (connection_job_t C) {
             if (ext_secrets[sid].bound_ip == 0) {
               ext_secrets[sid].bound_ip = client_ip;
               vkprintf (0, "[AUTH] Login: IP %s secured Secret #%d\n", show_remote_ip(C), sid);
+              db_notify_bound_ip(sid, client_ip);
             }
             vkprintf (2, "[CONN] Client Connected: IP %s (Total Conns: %d)\n", 
                       show_remote_ip(C), ext_secrets[sid].active_conns + 1);
             ext_secrets[sid].active_conns++;
+            ext_secrets[sid].fail_count = 0;
             D->secret_id = sid;
             break;
           }
@@ -1428,10 +1471,12 @@ int tcp_rpcs_compact_parse_execute (connection_job_t C) {
             if (ext_secrets[sid].bound_ip == 0) {
               ext_secrets[sid].bound_ip = c->remote_ip;
               vkprintf (0, "[AUTH] Login (Obfs): IP %s secured Secret #%d\n", show_remote_ip(C), sid);
+              db_notify_bound_ip(sid, c->remote_ip);
             }
             vkprintf (2, "[CONN] Client Connected (Obfs): IP %s (Total: %d)\n", 
                       show_remote_ip(C), ext_secrets[sid].active_conns + 1);
             ext_secrets[sid].active_conns++;
+            ext_secrets[sid].fail_count = 0;
             D->secret_id = sid;
           }
           assert (rwm_skip_data (&c->in, 64) == 64);
