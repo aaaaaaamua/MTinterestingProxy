@@ -28,23 +28,18 @@ jobs:
         run: |
           if [ -f objs/bin/mtproto-proxy ]; then echo "Binary found: objs/bin/mtproto-proxy"; else echo "Binary not found"; ls -R; exit 1; fi
 
-      - name: Package artifact
+      - name: Prepare release asset (no compression)
         id: package
         run: |
           set -e
-          VERSION=$(git describe --tags --always --dirty)
-          ARTIFACT_NAME=mtproto-proxy-ubuntu-x86_64-${VERSION}.tar.gz
-          mkdir -p dist
-          cp objs/bin/mtproto-proxy dist/ || true
-          cp README.md dist/ || true
-          tar -czf ${ARTIFACT_NAME} -C dist .
-          echo "artifact=${ARTIFACT_NAME}" >> $GITHUB_OUTPUT
-
-      - name: Upload build artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: ${{ steps.package.outputs.artifact }}
-          path: ${{ steps.package.outputs.artifact }}
+          # Ensure the binary exists
+          if [ -f objs/bin/mtproto-proxy ]; then
+            echo "artifact=objs/bin/mtproto-proxy" >> $GITHUB_OUTPUT
+          else
+            echo "Binary not found: objs/bin/mtproto-proxy"
+            ls -R
+            exit 1
+          fi
 
       - name: Create GitHub Release (if tag)
         if: startsWith(github.ref, 'refs/tags/')
