@@ -475,7 +475,7 @@ static unsigned char *create_request (const char *domain) {
   add_random (result, &pos, 32);
   add_string (result, &pos, "\x00\x22", 2);
   add_grease (result, &pos, greases, 0);
-  add_string (result, &pos, "\x13\x01\x13\x02\x13\x03\xc0\x2b\xc0\x2f\xc0\x2c\xc0\x30\cc\xa9\cc\xa8"
+  add_string (result, &pos, "\x13\x01\x13\x02\x13\x03\xc0\x2b\xc0\x2f\xc0\x2c\xc0\x30\xcc\xa9\xcc\xa8"
                             "\xc0\x13\xc0\x14\x00\x9c\x00\x9d\x00\x2f\x00\x35\x00\x0a\x01\x00\x01\x91", 36);
   add_grease (result, &pos, greases, 2);
   add_string (result, &pos, "\x00\x00\x00\x00", 4);
