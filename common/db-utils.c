@@ -52,8 +52,6 @@ static int _db_execute_raw(const char *query) {
     int res = mysql_query(conn, query);
     if (res) {
         kprintf("MySQL Error [%s]: %s\n", query, mysql_error(conn));
-    } else {
-        vkprintf(0, "SQL EXEC: %s\n", query); 
     }
     return res;
 }
@@ -76,10 +74,18 @@ void db_notify_bound_ip (int sid, unsigned int ip) {
         char query[256];
         char ip_str[INET_ADDRSTRLEN];
         struct in_addr addr;
-        addr.s_addr = ip;
+        // Fix byte order: MTProxy stores IP in Little-Endian or specific format, 
+        // inet_ntop expects Network Byte Order (Big-Endian).
+        addr.s_addr = htonl(ntohl(ip)); 
+        // Actually, if it's 180.142.93.112 instead of 112.93.142.180, it's a simple bswap issue.
+        // Let's use a reliable byte-by-byte approach if htonl doesn't cut it, 
+        // but typically ntohl(ip) and then casting correctly works.
+        addr.s_addr = ip; // Keep as is and use custom stringify if needed, but let's try __builtin_bswap32
+        unsigned int reversed_ip = __builtin_bswap32(ip);
+        addr.s_addr = reversed_ip;
+
         inet_ntop(AF_INET, &addr, ip_str, INET_ADDRSTRLEN);
-        // Hard Link: Update bound_ip once, never NULL it.
-        sprintf(query, "UPDATE secrets SET bound_ip='%s', active_conns=1 WHERE secret_hex='%s'", ip_str, hex);
+        sprintf(query, "UPDATE secrets SET bound_ip='%s' WHERE secret_hex='%s'", ip_str, hex);
         
         pthread_mutex_lock(&db_mutex);
         _db_execute_raw(query);
@@ -93,23 +99,20 @@ void db_sync_secrets (void) {
   if (!conn) db_init();
   if (!conn) { pthread_mutex_unlock(&db_mutex); return; }
 
-  // 1. Write back memory states (Only conns, NEVER NULLing bound_ip)
+  // 1. Write back memory states (Only bound_ip if present, no conns)
   int i, total = tcp_rpcs_get_count();
   for (i = 0; i < total; i++) {
     char hex[33];
     unsigned int ip;
     int conns;
     if (tcp_rpcs_get_secret_id_info(i, hex, &ip, &conns)) {
-      char query[512];
       if (ip != 0) {
+        char query[512];
         char ip_str[INET_ADDRSTRLEN];
         struct in_addr addr;
-        addr.s_addr = ip;
+        addr.s_addr = __builtin_bswap32(ip);
         inet_ntop(AF_INET, &addr, ip_str, INET_ADDRSTRLEN);
-        sprintf(query, "UPDATE secrets SET bound_ip='%s', active_conns=%d WHERE secret_hex='%s'", ip_str, conns, hex);
-        _db_execute_raw(query);
-      } else {
-        sprintf(query, "UPDATE secrets SET active_conns=%d WHERE secret_hex='%s'", conns, hex);
+        sprintf(query, "UPDATE secrets SET bound_ip='%s' WHERE secret_hex='%s'", ip_str, hex);
         _db_execute_raw(query);
       }
     }

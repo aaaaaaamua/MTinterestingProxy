@@ -1,3 +1,38 @@
+# v0.5
+run
+```bash
+./mtproto-proxy -u nobody -p 8888 --http-stats -H 15263 \
+  --db-host localhost \
+  --db-port 3306 \
+  --db-user root \
+  --db-pwd db-pwd \
+  --db-name mtproxy_billing \
+  --aes-pwd proxy-secret proxy-multi.conf -M 1
+
+```
+
+rebulid the code
+```bash
+cd ../.. && make clean && make && cd objs/bin
+```
+
+create the datebase
+```bash
+-- 1. 创建数据库（如果不存在）
+CREATE DATABASE IF NOT EXISTS mtproxy_billing;
+USE mtproxy_billing;
+
+-- 2. 创建 secrets 表
+-- 注意：secret_hex 用于匹配，bound_ip 用于硬锁定，active_conns 用于统计负载
+CREATE TABLE IF NOT EXISTS secrets (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    secret_hex CHAR(32) NOT NULL UNIQUE,
+    bound_ip VARCHAR(45) DEFAULT NULL,   -- 支持 IPv6 格式
+    active_conns INT DEFAULT 0,           -- 记录当前活跃连接数
+    is_active TINYINT(1) DEFAULT 1        -- 1=启用, 0=禁用
+);
+```
+
 # MTProxy
 Simple MT-Proto proxy
 
@@ -46,24 +81,10 @@ head -c 16 /dev/urandom | xxd -ps
 ./mtproto-proxy -u nobody -p 8888 -H 443 -S <secret> --aes-pwd proxy-secret proxy-multi.conf -M 1
 ```
 
-version 0.5
-```bash
-./mtproto-proxy -u nobody -p 8888 --http-stats -H 15263 \
-  --db-host localhost \
-  --db-port 3306 \
-  --db-user root \
-  --db-pwd db-pwd \
-  --db-name mtproxy_billing \
-  --aes-pwd proxy-secret proxy-multi.conf -M 1
 
+
+where:
 ```
-
-rebulid the code
-```bash
-cd ../.. && make clean && make && cd objs/bin
-```
-
-``` where:
 - `nobody` is the username. `mtproto-proxy` calls `setuid()` to drop privileges.
 - `443` is the port, used by clients to connect to the proxy.
 - `8888` is the local port. You can use it to get statistics from `mtproto-proxy`. Like `wget localhost:8888/stats`. You can only get this stat via loopback.
