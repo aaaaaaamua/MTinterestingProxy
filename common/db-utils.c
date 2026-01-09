@@ -173,3 +173,4 @@ void db_start_sync_thread (void) {
     pthread_detach (tid);
   }
 }
+}
