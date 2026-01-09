@@ -38,6 +38,7 @@ void db_init (void) {
 // External function from net-tcp-rpc-ext-server.c
 extern void tcp_rpcs_clear_secrets (void);
 extern void tcp_rpcs_add_secret_from_db (const char *hex_secret, const char *bound_ip);
+extern void tcp_rpcs_commit_secrets (void);
 
 void db_sync_secrets (void) {
   if (!conn) {
@@ -60,6 +61,7 @@ void db_sync_secrets (void) {
     tcp_rpcs_add_secret_from_db (row[0], row[1]);
   }
 
+  tcp_rpcs_commit_secrets ();
   mysql_free_result (res);
 }
 

@@ -166,12 +166,17 @@ void tcp_rpcs_set_ext_secret (unsigned char secret[16]) {
   }
 }
 
+// Use a temporary copy during sync to preserve states of existing secrets
+static struct secret_binding new_ext_secrets[16];
+static int new_ext_secret_cnt = 0;
+
 void tcp_rpcs_clear_secrets (void) {
-  ext_secret_cnt = 0;
+  new_ext_secret_cnt = 0;
+  memset(new_ext_secrets, 0, sizeof(new_ext_secrets));
 }
 
 void tcp_rpcs_add_secret_from_db (const char *hex_secret, const char *bound_ip_str) {
-  if (ext_secret_cnt >= 16) return;
+  if (new_ext_secret_cnt >= 16) return;
   unsigned char secret[16];
   int i;
   for (i = 0; i < 16; i++) {
@@ -179,14 +184,32 @@ void tcp_rpcs_add_secret_from_db (const char *hex_secret, const char *bound_ip_s
     sscanf (hex_secret + i * 2, "%2x", &val);
     secret[i] = (unsigned char)val;
   }
-  memcpy (ext_secrets[ext_secret_cnt].key, secret, 16);
-  ext_secrets[ext_secret_cnt].active_conns = 0;
-  if (bound_ip_str && strlen(bound_ip_str) > 0) {
-    ext_secrets[ext_secret_cnt].bound_ip = inet_addr(bound_ip_str);
-  } else {
-    ext_secrets[ext_secret_cnt].bound_ip = 0;
+  
+  memcpy (new_ext_secrets[new_ext_secret_cnt].key, secret, 16);
+  
+  // Try to find if this secret existed before to preserve its state
+  int old_idx;
+  for (old_idx = 0; old_idx < ext_secret_cnt; old_idx++) {
+    if (!memcmp(ext_secrets[old_idx].key, secret, 16)) {
+      new_ext_secrets[new_ext_secret_cnt].bound_ip = ext_secrets[old_idx].bound_ip;
+      new_ext_secrets[new_ext_secret_cnt].active_conns = ext_secrets[old_idx].active_conns;
+      break;
+    }
   }
-  ext_secret_cnt++;
+
+  // Only if it's truly new and has a bound_ip from DB (manual override)
+  if (old_idx == ext_secret_cnt) {
+    if (bound_ip_str && strlen(bound_ip_str) > 0) {
+      new_ext_secrets[new_ext_secret_cnt].bound_ip = inet_addr(bound_ip_str);
+    }
+  }
+  
+  new_ext_secret_cnt++;
+}
+
+void tcp_rpcs_commit_secrets (void) {
+  memcpy(ext_secrets, new_ext_secrets, sizeof(ext_secrets));
+  ext_secret_cnt = new_ext_secret_cnt;
 }
 
 static int allow_only_tls;
@@ -1035,7 +1058,9 @@ int tcp_rpcs_ext_init_accepted (connection_job_t C) {
 int tcp_rpcs_ext_close_connection (connection_job_t C, int who) {
   struct tcp_rpc_data *D = TCP_RPC_DATA (C);
   if (D->secret_id >= 0 && D->secret_id < 16) {
-    ext_secrets[D->secret_id].active_conns--;
+    if (ext_secrets[D->secret_id].active_conns > 0) {
+      ext_secrets[D->secret_id].active_conns--;
+    }
     vkprintf (0, "[DISC] Client Disconnected: IP %s (Secret #%d, Remaining Conns: %d)\n", 
               show_remote_ip(C), D->secret_id, ext_secrets[D->secret_id].active_conns);
     if (ext_secrets[D->secret_id].active_conns <= 0) {
