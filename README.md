@@ -45,6 +45,19 @@ head -c 16 /dev/urandom | xxd -ps
 ```bash
 ./mtproto-proxy -u nobody -p 8888 -H 443 -S <secret> --aes-pwd proxy-secret proxy-multi.conf -M 1
 ```
+
+version 0.5
+```bash
+./mtproto-proxy -u nobody -p 8888 --http-stats -H 15263 \
+  --db-host localhost \
+  --db-port 3306 \
+  --db-user root \
+  --db-pwd db-pwd \
+  --db-name mtproxy_billing \
+  --aes-pwd proxy-secret proxy-multi.conf -M 1
+
+```
+
 ... where:
 - `nobody` is the username. `mtproto-proxy` calls `setuid()` to drop privileges.
 - `443` is the port, used by clients to connect to the proxy.
