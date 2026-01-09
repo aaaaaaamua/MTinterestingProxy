@@ -192,7 +192,7 @@ void tcp_rpcs_add_secret_from_db (const char *hex_secret, const char *bound_ip_s
   
   memcpy (new_ext_secrets[new_ext_secret_cnt].key, secret, 16);
   
-  // Try to find if this secret existed before to preserve its state
+  // Hard Lock Logic: Try to find if this secret existed before to preserve its state
   int old_idx;
   for (old_idx = 0; old_idx < ext_secret_cnt; old_idx++) {
     if (!memcmp(ext_secrets[old_idx].key, secret, 16)) {
@@ -203,7 +203,7 @@ void tcp_rpcs_add_secret_from_db (const char *hex_secret, const char *bound_ip_s
     }
   }
 
-  // If new from DB and has explicit bound_ip, use it
+  // Only if it's truly new and has a bound_ip from DB (Admin manual bind)
   if (old_idx == ext_secret_cnt) {
     if (bound_ip_str && strlen(bound_ip_str) > 0) {
       new_ext_secrets[new_ext_secret_cnt].bound_ip = inet_addr(bound_ip_str);
@@ -234,16 +234,17 @@ int tcp_rpcs_get_count (void) {
   return ext_secret_cnt;
 }
 
-// 30s check for keepalive/fail_count logic
+// Hard Binding: Check only for status change log, NO UNBINDING
 void tcp_rpcs_check_keepalive (void) {
     int i;
     for (i = 0; i < ext_secret_cnt; i++) {
         if (ext_secrets[i].bound_ip != 0 && ext_secrets[i].active_conns == 0) {
-            ext_secrets[i].fail_count++;
-            if (ext_secrets[i].fail_count >= 4) {
-                vkprintf (0, "[AUTH] Logout: Secret #%d is now available (Idle timeout)\n", i);
-                ext_secrets[i].bound_ip = 0;
-                ext_secrets[i].fail_count = 0;
+            if (ext_secrets[i].fail_count < 4) {
+                ext_secrets[i].fail_count++;
+                if (ext_secrets[i].fail_count == 4) {
+                    vkprintf (0, "[AUTH] Idle: Secret #%d is now inactive but remains LOCKED to IP %s\n", 
+                              i, inet_ntoa(*(struct in_addr *)&ext_secrets[i].bound_ip));
+                }
             }
         } else {
             ext_secrets[i].fail_count = 0;
@@ -251,7 +252,7 @@ void tcp_rpcs_check_keepalive (void) {
     }
 }
 
-// Kick logic
+// Kick logic - only place where bound_ip can be cleared manually via DB
 void tcp_rpcs_kick_secret (const char *hex_secret) {
     unsigned char secret[16];
     int i;
@@ -263,7 +264,7 @@ void tcp_rpcs_kick_secret (const char *hex_secret) {
     for (i = 0; i < ext_secret_cnt; i++) {
         if (!memcmp(ext_secrets[i].key, secret, 16)) {
             if (ext_secrets[i].bound_ip != 0) {
-                vkprintf (0, "[AUTH] Kicked: Secret #%d forced disconnect\n", i);
+                vkprintf (0, "[AUTH] Kicked: Secret #%d forced unlock\n", i);
                 ext_secrets[i].bound_ip = 0;
                 ext_secrets[i].active_conns = 0;
                 ext_secrets[i].fail_count = 0;
@@ -468,7 +469,7 @@ static unsigned char *create_request (const char *domain) {
   add_random (result, &pos, 32);
   add_string (result, &pos, "\x00\x22", 2);
   add_grease (result, &pos, greases, 0);
-  add_string (result, &pos, "\x13\x01\x13\x02\x13\x03\xc0\x2b\xc0\x2f\xc0\x2c\xc0\x30\xcc\xa9\xcc\xa8"
+  add_string (result, &pos, "\x13\x01\x13\x02\x13\x03\xc0\x2b\xc0\x2f\xc0\x2c\xc0\x30\cc\xa9\cc\xa8"
                             "\xc0\x13\xc0\x14\x00\x9c\x00\x9d\x00\x2f\x00\x35\x00\x0a\x01\x00\x01\x91", 36);
   add_grease (result, &pos, greases, 2);
   add_string (result, &pos, "\x00\x00\x00\x00", 4);
@@ -1124,7 +1125,7 @@ int tcp_rpcs_ext_close_connection (connection_job_t C, int who) {
     }
     vkprintf (2, "[DISC] Client Disconnected: IP %s (Remaining: %d)\n", 
               show_remote_ip(C), ext_secrets[D->secret_id].active_conns);
-    // Anti-flap Logout logic moved to check_keepalive (30s x 4)
+    // Hard Lock: No IP unbinding here
   }
   return tcp_rpcs_close_connection (C, who);
 }
@@ -1289,13 +1290,13 @@ int tcp_rpcs_compact_parse_execute (connection_job_t C) {
           if (memcmp (expected_random, client_random, 28) == 0) {
             unsigned int client_ip = c->remote_ip;
             if (ext_secrets[sid].bound_ip != 0 && ext_secrets[sid].bound_ip != client_ip) {
-              vkprintf (1, "Secret %d already bound to IP %s, rejecting connection from %s\n", 
+              vkprintf (1, "HARD LOCK: Secret %d tied to IP %s, rejecting %s\n", 
                         sid, inet_ntoa(*(struct in_addr *)&ext_secrets[sid].bound_ip), show_remote_ip(C));
               continue; 
             }
             if (ext_secrets[sid].bound_ip == 0) {
               ext_secrets[sid].bound_ip = client_ip;
-              vkprintf (0, "[AUTH] Login: IP %s secured Secret #%d\n", show_remote_ip(C), sid);
+              vkprintf (0, "[AUTH] Login: IP %s secured Secret #%d (HARD LOCKED)\n", show_remote_ip(C), sid);
               db_notify_bound_ip(sid, client_ip);
             }
             vkprintf (2, "[CONN] Client Connected: IP %s (Total Conns: %d)\n", 
@@ -1470,7 +1471,7 @@ int tcp_rpcs_compact_parse_execute (connection_job_t C) {
           if (ext_secret_cnt > 0) {
             if (ext_secrets[sid].bound_ip == 0) {
               ext_secrets[sid].bound_ip = c->remote_ip;
-              vkprintf (0, "[AUTH] Login (Obfs): IP %s secured Secret #%d\n", show_remote_ip(C), sid);
+              vkprintf (0, "[AUTH] Login (Obfs): IP %s secured Secret #%d (HARD LOCKED)\n", show_remote_ip(C), sid);
               db_notify_bound_ip(sid, c->remote_ip);
             }
             vkprintf (2, "[CONN] Client Connected (Obfs): IP %s (Total: %d)\n", 

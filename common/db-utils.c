@@ -17,13 +17,20 @@ struct db_config proxy_db_config = {
 };
 
 static MYSQL *conn = NULL;
+static pthread_mutex_t db_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 void db_init (void) {
+  if (conn) return;
   conn = mysql_init (NULL);
   if (conn == NULL) {
     kprintf ("Error: mysql_init failed\n");
     return;
   }
+
+  unsigned int timeout = 5;
+  mysql_options(conn, MYSQL_OPT_CONNECT_TIMEOUT, (const char *)&timeout);
+  bool reconnect = true;
+  mysql_options(conn, MYSQL_OPT_RECONNECT, &reconnect);
 
   if (mysql_real_connect (conn, proxy_db_config.host, proxy_db_config.user, 
                           proxy_db_config.pwd, proxy_db_config.name, 
@@ -33,7 +40,22 @@ void db_init (void) {
     conn = NULL;
     return;
   }
-  kprintf ("MySQL connected to %s:%d\n", proxy_db_config.host, proxy_db_config.port);
+  kprintf ("MySQL session established with %s:%d\n", proxy_db_config.host, proxy_db_config.port);
+}
+
+static int _db_execute_raw(const char *query) {
+    if (!conn) db_init();
+    if (!conn) return -1;
+    
+    if (mysql_ping(conn)) { }
+
+    int res = mysql_query(conn, query);
+    if (res) {
+        kprintf("MySQL Error [%s]: %s\n", query, mysql_error(conn));
+    } else {
+        vkprintf(0, "SQL EXEC: %s\n", query); 
+    }
+    return res;
 }
 
 // External function from net-tcp-rpc-ext-server.c
@@ -47,7 +69,6 @@ extern void tcp_rpcs_kick_secret (const char *hex_secret);
 
 // Immediate write-back on handshake
 void db_notify_bound_ip (int sid, unsigned int ip) {
-    if (!conn) return;
     char hex[33];
     unsigned int dummy_ip;
     int dummy_conns;
@@ -57,18 +78,22 @@ void db_notify_bound_ip (int sid, unsigned int ip) {
         struct in_addr addr;
         addr.s_addr = ip;
         inet_ntop(AF_INET, &addr, ip_str, INET_ADDRSTRLEN);
+        // Hard Link: Update bound_ip once, never NULL it.
         sprintf(query, "UPDATE secrets SET bound_ip='%s', active_conns=1 WHERE secret_hex='%s'", ip_str, hex);
-        mysql_query(conn, query);
+        
+        pthread_mutex_lock(&db_mutex);
+        _db_execute_raw(query);
+        mysql_commit(conn);
+        pthread_mutex_unlock(&db_mutex);
     }
 }
 
 void db_sync_secrets (void) {
-  if (!conn) {
-    db_init ();
-    if (!conn) return;
-  }
+  pthread_mutex_lock(&db_mutex);
+  if (!conn) db_init();
+  if (!conn) { pthread_mutex_unlock(&db_mutex); return; }
 
-  // 1. Full write-back state
+  // 1. Write back memory states (Only conns, NEVER NULLing bound_ip)
   int i, total = tcp_rpcs_get_count();
   for (i = 0; i < total; i++) {
     char hex[33];
@@ -76,21 +101,22 @@ void db_sync_secrets (void) {
     int conns;
     if (tcp_rpcs_get_secret_id_info(i, hex, &ip, &conns)) {
       char query[512];
-      if (ip == 0) {
-        sprintf(query, "UPDATE secrets SET bound_ip=NULL, active_conns=%d WHERE secret_hex='%s'", conns, hex);
-      } else {
+      if (ip != 0) {
         char ip_str[INET_ADDRSTRLEN];
         struct in_addr addr;
         addr.s_addr = ip;
         inet_ntop(AF_INET, &addr, ip_str, INET_ADDRSTRLEN);
         sprintf(query, "UPDATE secrets SET bound_ip='%s', active_conns=%d WHERE secret_hex='%s'", ip_str, conns, hex);
+        _db_execute_raw(query);
+      } else {
+        sprintf(query, "UPDATE secrets SET active_conns=%d WHERE secret_hex='%s'", conns, hex);
+        _db_execute_raw(query);
       }
-      mysql_query(conn, query);
     }
   }
+  mysql_commit(conn);
 
-  // 2. Process Kicks and Sync (Only active secrets)
-  // Logic: Secrets in DB with is_active=0 should be kicked
+  // 2. Process Kicks
   if (mysql_query (conn, "SELECT secret_hex FROM secrets WHERE is_active=0")) {
       kprintf ("Error: mysql_query kick check failed\n");
   } else {
@@ -104,33 +130,32 @@ void db_sync_secrets (void) {
       }
   }
 
-  // 3. Reload secrets
+  // 3. Reload active secrets
   if (mysql_query (conn, "SELECT secret_hex, bound_ip FROM secrets WHERE is_active=1")) {
-    kprintf ("Error: mysql_query fetch failed\n");
-    return;
+    kprintf ("Error: mysql_query fetch failed: %s\n", mysql_error(conn));
+  } else {
+    MYSQL_RES *res = mysql_store_result (conn);
+    if (res) {
+        tcp_rpcs_clear_secrets ();
+        MYSQL_ROW row;
+        while ((row = mysql_fetch_row (res))) {
+            tcp_rpcs_add_secret_from_db (row[0], row[1]);
+        }
+        tcp_rpcs_commit_secrets ();
+        mysql_free_result (res);
+    }
   }
-
-  MYSQL_RES *res = mysql_store_result (conn);
-  if (!res) return;
-
-  tcp_rpcs_clear_secrets ();
-  MYSQL_ROW row;
-  while ((row = mysql_fetch_row (res))) {
-    tcp_rpcs_add_secret_from_db (row[0], row[1]);
-  }
-  tcp_rpcs_commit_secrets ();
-  mysql_free_result (res);
+  
+  pthread_mutex_unlock(&db_mutex);
 }
 
 static void *db_sync_thread_main (void *arg) {
   int tick = 0;
   while (1) {
     tick++;
-    // Periodic Keepalive Check (Every 30s)
     if (tick % 3 == 0) {
         tcp_rpcs_check_keepalive();
     }
-    // Periodic Full DB Sync (Every 60s)
     if (tick >= 6) {
         db_sync_secrets();
         tick = 0;
